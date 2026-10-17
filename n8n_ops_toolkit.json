@@ -1,0 +1,966 @@
+{
+  "name": "n8n Ops Toolkit (GitHub backup with secret redaction + health report)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## n8n Ops Toolkit\nTwo jobs that keep an n8n instance safe in production:\n1. **Backup**: every workflow is exported to a GitHub repo (one file each). Secrets are redacted, pinned data is dropped, and a file is only written when its content really changed.\n2. **Health report**: a daily Telegram digest of failures, unauthenticated webhooks, hardcoded secrets, workflows without an Error Workflow and idle workflows.\n\n**Before running:**\n1. In n8n create an API key (Settings > n8n API). Credentials: 'n8n API key' (Header Auth, name `X-N8N-API-KEY`), 'GitHub token' (Header Auth, name `Authorization`, value `Bearer <fine-grained token with Contents: read/write on ONE private repo>`), Telegram\n2. Fill the two *Config* nodes (owner, repo, branch, folder, API URL) and `REPLACE_WITH_ALERT_CHAT_ID`\n3. Set 'Error Workflow' in Workflow Settings to this workflow\n4. Run 'Manual Backup' and 'Manual Health', then activate\nUse a PRIVATE repository.",
+        "height": 520,
+        "width": 760,
+        "color": 4
+      },
+      "id": "1d38d0ce-dc33-4ad9-a5f7-70b42e1057fc",
+      "name": "Notes - General",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Backup logic\nThe repo folder is listed once (1 request). For each workflow the git blob id (`sha1(\"blob <size>\\0<content>\")`) is computed locally and compared with the id GitHub reports, so unchanged workflows cost no request. Only new or changed files are written, one per second. Files of deleted workflows are reported, never deleted.",
+        "height": 220,
+        "width": 600,
+        "color": 5
+      },
+      "id": "7a24a6b1-5b63-48ba-9c4a-3ee2fad19577",
+      "name": "Notes - Backup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        760,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Health checks\nUses the last 1000 executions from the n8n API. The idle-workflow check only runs when those executions cover at least 7 days, otherwise it says so instead of guessing.",
+        "height": 160,
+        "width": 520,
+        "color": 6
+      },
+      "id": "6f28ace2-1ea7-46d1-b760-f795d0ec583f",
+      "name": "Notes - Health",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        760,
+        1060
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "19125c17-74b5-4122-b128-eff3ef8bfe39",
+      "name": "Daily Backup Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "537020f7-3a62-4318-b6da-a3d079197d5d",
+      "name": "Manual Backup",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "83ff070f-e003-4eb5-ab4d-0221560e5d66",
+              "name": "github_owner",
+              "value": "REPLACE_WITH_GITHUB_OWNER",
+              "type": "string"
+            },
+            {
+              "id": "274002b2-a61e-4cad-9b2a-27db6d828082",
+              "name": "github_repo",
+              "value": "REPLACE_WITH_REPO_NAME",
+              "type": "string"
+            },
+            {
+              "id": "bcf61451-50f3-4a74-b976-7a645aece85f",
+              "name": "github_branch",
+              "value": "main",
+              "type": "string"
+            },
+            {
+              "id": "40fffb89-5aa9-4c6f-93a9-e35d6629610c",
+              "name": "backup_dir",
+              "value": "workflows",
+              "type": "string"
+            },
+            {
+              "id": "6f87d3b5-e6f7-43a0-b86b-a3dcf338273c",
+              "name": "n8n_api_url",
+              "value": "http://localhost:5678/api/v1",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2771f9ff-489e-4f02-bb43-419ec2342068",
+      "name": "Backup Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const c = $input.first().json;\nconst bad = m => { throw new Error('Backup configuration error: ' + m); };\nfor (const k of ['github_owner', 'github_repo', 'github_branch', 'backup_dir', 'n8n_api_url']) {\n  if (typeof c[k] !== 'string' || !c[k].trim()) bad(k + ' is empty');\n  if (/^REPLACE/i.test(c[k])) bad(k + ' still has the placeholder value');\n}\nif (!/^[A-Za-z0-9_.-]{1,100}$/.test(c.github_owner)) bad('github_owner has invalid characters');\nif (!/^[A-Za-z0-9_.-]{1,100}$/.test(c.github_repo)) bad('github_repo has invalid characters');\nif (!/^[A-Za-z0-9_.\\/-]{1,100}$/.test(c.github_branch) || c.github_branch.includes('..') || c.github_branch.startsWith('/') || c.github_branch.endsWith('/')) bad('github_branch is not a valid branch name');\nif (!/^[A-Za-z0-9_-]+(\\/[A-Za-z0-9_-]+)*$/.test(c.backup_dir)) bad('backup_dir must look like \"workflows\" or \"n8n/workflows\"');\nif (!/^https?:\\/\\/[^\\s/]+(\\/[^\\s?#]*)?$/.test(c.n8n_api_url)) bad('n8n_api_url must be an http(s) URL such as http://localhost:5678/api/v1');\nreturn [{ json: { ...c, n8n_api_url: c.n8n_api_url.replace(/\\/+$/, '') } }];"
+      },
+      "id": "e3d3bf31-e397-4913-98bd-af09eafcc117",
+      "name": "Validate Backup Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.n8n_api_url + '/workflows' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "cursor",
+                    "value": "={{ $response.body.nextCursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextCursor }}",
+              "limitPagesFetched": true,
+              "maxRequests": 40
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "0cbea8a2-9a15-464e-b9a4-ef024ba68a86",
+      "name": "Fetch Workflows (Backup)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        180
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ID",
+          "name": "n8n API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const pages = $input.all().map(i => i.json);\nconst byId = new Map();\nlet pageErrors = 0, lastError = '';\nfor (const p of pages) {\n  if (!p || p.error) { pageErrors++; const e = p && p.error; lastError = typeof e === 'string' ? e : (e && e.message) || 'request failed'; continue; }\n  for (const w of (Array.isArray(p.data) ? p.data : [])) if (w && w.id !== undefined && w.id !== null) byId.set(String(w.id), w);\n}\nif (!byId.size && pageErrors) throw new Error('Could not read workflows from the n8n API: ' + lastError);\nreturn [{ json: { workflows: [...byId.values()], page_errors: pageErrors } }];"
+      },
+      "id": "2f141111-f8f0-468d-9141-57be0e1b167e",
+      "name": "Collect Workflows (Backup)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.github.com/repos/' + $('Validate Backup Config').first().json.github_owner + '/' + $('Validate Backup Config').first().json.github_repo + '/contents/' + $('Validate Backup Config').first().json.backup_dir + '?ref=' + $('Validate Backup Config').first().json.github_branch }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "n8n-ops-toolkit"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "6fb22cb7-844f-4e70-ab98-ec9d72149ef3",
+      "name": "List Repo Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        180
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ID",
+          "name": "GitHub token"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ---------- shared helpers (identical in every node that needs them) ----------\n// SHA-1 in pure JavaScript, so no Node built-in module has to be enabled on the n8n instance\nconst sha1 = bytes => {\n  const ml = bytes.length;\n  const buf = new Uint8Array(((ml + 8) >> 6 << 6) + 64);\n  buf.set(bytes); buf[ml] = 0x80;\n  const dv = new DataView(buf.buffer);\n  dv.setUint32(buf.length - 4, (ml << 3) >>> 0);\n  dv.setUint32(buf.length - 8, Math.floor(ml / 0x20000000));\n  let h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;\n  const w = new Uint32Array(80);\n  for (let off = 0; off < buf.length; off += 64) {\n    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);\n    for (let i = 16; i < 80; i++) { const x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = ((x << 1) | (x >>> 31)) >>> 0; }\n    let a = h0, b = h1, c = h2, d = h3, e = h4;\n    for (let i = 0; i < 80; i++) {\n      let f, k;\n      if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }\n      else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }\n      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }\n      else { f = b ^ c ^ d; k = 0xCA62C1D6; }\n      const t = ((((a << 5) | (a >>> 27)) + f + e + k + w[i]) >>> 0);\n      e = d; d = c; c = ((b << 30) | (b >>> 2)) >>> 0; b = a; a = t;\n    }\n    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0; h4 = (h4 + e) >>> 0;\n  }\n  return [h0, h1, h2, h3, h4].map(x => x.toString(16).padStart(8, '0')).join('');\n};\n// Git object id of a file: sha1(\"blob <size>\\0<content>\"). Equal ids mean identical content.\nconst gitBlobSha = content => {\n  const body = Buffer.from(content, 'utf8');\n  return sha1(Buffer.concat([Buffer.from('blob ' + body.length + '\\0', 'utf8'), body]));\n};\nconst sortKeys = v => Array.isArray(v) ? v.map(sortKeys)\n  : (v && typeof v === 'object') ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys(v[k])])) : v;\nconst slug = s => (String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')\n  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '')) || 'workflow';\n\n// ---------- secret detection and redaction ----------\nconst KEY_RE = /(^|[_\\-. ])(api[_\\-. ]?key|secret|token|password|passwd|authorization|private[_\\-. ]?key|client[_\\-. ]?secret|access[_\\-. ]?key)([_\\-. ]|$)/;\nconst VALUE_PATTERNS = [\n  ['github-token', /\\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\\b|\\bgithub_pat_[A-Za-z0-9_]{22,}\\b/g],\n  ['aws-access-key', /\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b/g],\n  ['slack-token', /\\bxox[abprs]-[A-Za-z0-9-]{10,}\\b/g],\n  ['api-key', /\\bsk-[A-Za-z0-9_-]{20,}\\b/g],\n  ['google-api-key', /\\bAIza[0-9A-Za-z_-]{35}\\b/g],\n  ['stripe-key', /\\b[sr]k_live_[0-9A-Za-z]{16,}\\b/g],\n  ['telegram-bot-token', /\\b\\d{8,10}:[A-Za-z0-9_-]{35}\\b/g],\n  ['jwt', /\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b/g],\n  ['private-key', /-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g]\n];\nconst snake = k => String(k).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();\nconst looksLikeSecretKey = k => KEY_RE.test(snake(k));\nconst isPlaceholder = v => /^=/.test(v) || /^\\$\\{?[A-Z0-9_]+\\}?$/.test(v) || /^(REPLACE|YOUR|CHANGE|<|\\*{3,}|x{4,}|\\[REDACTED\\])/i.test(v) || /^https?:\\/\\//i.test(v);\nconst redact = input => {\n  const findings = [];\n  const walk = (v, keyHint) => {\n    if (Array.isArray(v)) return v.map(x => walk(x, null));\n    if (v && typeof v === 'object') {\n      const out = {};\n      const pairName = typeof v.name === 'string' && typeof v.value === 'string' && looksLikeSecretKey(v.name) ? v.name : null;\n      for (const k of Object.keys(v)) {\n        if (k === 'value' && pairName && v.value.trim().length >= 8 && !isPlaceholder(v.value)) { findings.push('key:' + pairName); out[k] = '[REDACTED]'; }\n        else out[k] = walk(v[k], k);\n      }\n      return out;\n    }\n    if (typeof v !== 'string') return v;\n    let s = v;\n    if (keyHint && looksLikeSecretKey(keyHint) && s.trim().length >= 8 && !isPlaceholder(s)) { findings.push('key:' + keyHint); return '[REDACTED]'; }\n    for (const [name, re] of VALUE_PATTERNS) {\n      s = s.replace(re, () => { findings.push(name); return '[REDACTED]'; });\n    }\n    return s;\n  };\n  return { value: walk(input, null), findings };\n};\nconst sanitizeWorkflow = w => {\n  const base = {\n    id: String(w.id), name: w.name, active: !!w.active,\n    nodes: w.nodes || [], connections: w.connections || {}, settings: w.settings || {},\n    tags: (w.tags || []).map(t => (t && t.name) || t).filter(Boolean).sort()\n  };\n  if (w.meta) base.meta = w.meta;\n  // pinData and staticData are dropped on purpose: they can hold real customer data\n  const r = redact(base);\n  return { workflow: sortKeys(r.value), findings: r.findings };\n};\nconst cfg = $('Validate Backup Config').first().json;\nconst { workflows, page_errors } = $('Collect Workflows (Backup)').first().json;\nconst items = $input.all().map(i => i.json);\n\nconst summary = { total: 0, created: 0, updated: 0, unchanged: 0, skipped_ids: [], secrets: [], renamed: [], orphaned: [],\n  partial: page_errors > 0, fatal: null, written: 0, write_failures: [] };\nconst done = () => [{ json: { skip: true, summary } }];\n\n// Directory listing from the GitHub contents API (a 404 means the folder does not exist yet)\nlet remote = [];\nconst err = items.find(i => i && i.error);\nif (err) {\n  const e = err.error, msg = typeof e === 'string' ? e : (e && e.message) || 'unknown error';\n  const code = String((e && (e.httpCode || e.statusCode)) || '');\n  if (!(code === '404' || /\\b404\\b|not found/i.test(msg))) { summary.fatal = 'Could not list the backup folder on GitHub: ' + msg; return done(); }\n} else {\n  remote = items.filter(i => i && i.type === 'file' && /\\.json$/.test(i.name || ''));\n}\nconst remoteByName = new Map(remote.map(f => [f.name, f.sha]));\n\nconst writes = [];\nconst currentIds = new Set();\nfor (const w of workflows) {\n  const id = String(w.id);\n  if (!/^[A-Za-z0-9]{1,40}$/.test(id)) { summary.skipped_ids.push(id.slice(0, 20)); continue; }\n  currentIds.add(id);\n  const { workflow, findings } = sanitizeWorkflow(w);\n  if (findings.length) summary.secrets.push({ id, name: String(w.name || ''), count: findings.length, kinds: [...new Set(findings.map(f => f.split(':')[0] === 'key' ? f : f))].slice(0, 5) });\n  const content = JSON.stringify(workflow, null, 2) + '\\n';\n  const fileName = id + '-' + slug(w.name) + '.json';\n  const path = cfg.backup_dir + '/' + fileName;\n  summary.total++;\n  const blob = gitBlobSha(content);\n  const existing = remoteByName.get(fileName);\n  if (existing === blob) { summary.unchanged++; continue; }\n  const sameId = remote.find(f => f.name.startsWith(id + '-') && f.name !== fileName);\n  if (sameId) summary.renamed.push({ from: sameId.name, to: fileName });\n  const action = existing ? 'update' : 'create';\n  summary[action === 'update' ? 'updated' : 'created']++;\n  const body = {\n    message: (action === 'update' ? 'Update ' : 'Add ') + String(w.name || id).replace(/[\\r\\n]+/g, ' ').slice(0, 80) + ' (' + id + ')',\n    content: Buffer.from(content, 'utf8').toString('base64'),\n    branch: cfg.github_branch\n  };\n  if (existing) body.sha = existing;\n  writes.push({ action, path, workflow: String(w.name || id), url: 'https://api.github.com/repos/' + cfg.github_owner + '/' + cfg.github_repo + '/contents/' + path, body });\n}\n// Files in the repo that no longer match a workflow (deleted in n8n). Reported, never deleted.\nif (!summary.partial) {\n  for (const f of remote) {\n    const fid = f.name.split('-')[0];\n    if (!currentIds.has(fid) && !summary.renamed.some(r => r.from === f.name)) summary.orphaned.push(f.name);\n  }\n}\nif (!writes.length) return done();\nreturn writes.map(w => ({ json: { ...w, summary } }));"
+      },
+      "id": "963c57f6-d274-446f-9ac1-fa8e2dec3460",
+      "name": "Plan Backup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "24f567e6-a04e-4eb8-8b02-28e236e2e2be",
+              "leftValue": "={{ !$json.skip }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e05509b5-8257-435b-96d9-8d7481b82796",
+      "name": "Files To Write?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1820,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "n8n-ops-toolkit"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "23252637-effa-4854-884c-4f775e532d2a",
+      "name": "Write File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ID",
+          "name": "GitHub token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const plan = $('Plan Backup').all().map(i => i.json);\nconst results = $input.all().map(i => i.json);\nconst summary = plan[0].summary;\nlet ok = 0;\nconst failures = [];\nplan.forEach((p, idx) => {\n  const r = results[idx];\n  if (!r || r.error) {\n    const e = r && r.error;\n    failures.push({ workflow: p.workflow, error: String(typeof e === 'string' ? e : (e && e.message) || 'no response').slice(0, 200) });\n  } else ok++;\n});\nreturn [{ json: { summary: { ...summary, written: ok, write_failures: failures } } }];"
+      },
+      "id": "1e634d72-ed71-4e36-b0b3-cf306a1f5bba",
+      "name": "Collect Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const s = ($input.first().json || {}).summary;\nif (!s) return [];\nconst esc = x => String(x === null || x === undefined ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst noteworthy = s.fatal || s.created || s.updated || s.write_failures.length || s.secrets.length || s.orphaned.length || s.renamed.length || s.partial || s.skipped_ids.length;\nif (!noteworthy) return [];\nconst lines = [];\nif (s.fatal) {\n  lines.push('❌ <b>n8n backup failed</b>', esc(s.fatal));\n} else {\n  const failed = s.write_failures.length;\n  lines.push((failed ? '⚠️' : '💾') + ' <b>n8n backup</b>: ' + s.total + ' workflows, ' + s.created + ' new, ' + s.updated + ' changed, ' + s.unchanged + ' unchanged' + (failed ? ', ' + failed + ' failed to save' : ''));\n  for (const f of s.write_failures.slice(0, 5)) lines.push('• ' + esc(f.workflow) + ': ' + esc(f.error));\n}\nif (s.partial) lines.push('', '⚠️ Some pages of the workflow list could not be read. Orphan detection was skipped.');\nif (s.secrets.length) {\n  lines.push('', '🔑 <b>Secrets found in workflow JSON</b> (redacted in the backup, but still stored in n8n):');\n  for (const x of s.secrets.slice(0, 8)) lines.push('• ' + esc(x.name) + ' (' + x.count + ')');\n  lines.push('Move them into credentials or environment variables and rotate them.');\n}\nif (s.renamed.length) lines.push('', 'Renamed (old file kept): ' + esc(s.renamed.slice(0, 5).map(r => r.from).join(', ')));\nif (s.orphaned.length) lines.push('', '🗑 Not in n8n any more (kept in the repo): ' + esc(s.orphaned.slice(0, 8).join(', ')) + (s.orphaned.length > 8 ? ' and ' + (s.orphaned.length - 8) + ' more' : ''));\nif (s.skipped_ids.length) lines.push('', 'Skipped (unexpected id): ' + esc(s.skipped_ids.join(', ')));\nreturn [{ json: { text: lines.join('\\n').slice(0, 3800) } }];"
+      },
+      "id": "ba9d4957-f670-4006-b395-bbf68305ab5a",
+      "name": "Format Backup Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "cb7810b0-0652-4e85-aec4-438541369b65",
+      "name": "Send Backup Report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2860,
+        180
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "45 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "345bfe2a-91ce-4d2d-bfac-79e8a3c6bf5c",
+      "name": "Daily Health Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        700
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c1199ce2-c1f0-4528-9e15-a1d495e96445",
+      "name": "Manual Health",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        860
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2b7edde4-ab36-4df0-89c5-099ffa2884fe",
+              "name": "n8n_api_url",
+              "value": "http://localhost:5678/api/v1",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2b7ccc29-b04e-43df-8368-58226a3a4a0f",
+      "name": "Health Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const c = $input.first().json;\nif (typeof c.n8n_api_url !== 'string' || /^REPLACE/i.test(c.n8n_api_url) || !/^https?:\\/\\/[^\\s/]+(\\/[^\\s?#]*)?$/.test(c.n8n_api_url)) {\n  throw new Error('Health configuration error: n8n_api_url must be an http(s) URL such as http://localhost:5678/api/v1');\n}\nreturn [{ json: { ...c, n8n_api_url: c.n8n_api_url.replace(/\\/+$/, '') } }];"
+      },
+      "id": "dc024dc7-69bc-47a1-9562-a34e69f4e93a",
+      "name": "Validate Health Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.n8n_api_url + '/workflows' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "cursor",
+                    "value": "={{ $response.body.nextCursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextCursor }}",
+              "limitPagesFetched": true,
+              "maxRequests": 40
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "6ea47ccb-3a0e-4710-b6be-b511458f6ea8",
+      "name": "Fetch Workflows (Health)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        780
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ID",
+          "name": "n8n API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const pages = $input.all().map(i => i.json);\nconst byId = new Map();\nlet pageErrors = 0, lastError = '';\nfor (const p of pages) {\n  if (!p || p.error) { pageErrors++; const e = p && p.error; lastError = typeof e === 'string' ? e : (e && e.message) || 'request failed'; continue; }\n  for (const w of (Array.isArray(p.data) ? p.data : [])) if (w && w.id !== undefined && w.id !== null) byId.set(String(w.id), w);\n}\nif (!byId.size && pageErrors) throw new Error('Could not read workflows from the n8n API: ' + lastError);\nreturn [{ json: { workflows: [...byId.values()], page_errors: pageErrors } }];"
+      },
+      "id": "3bab2ded-0262-4fff-a02a-34cf744b2de9",
+      "name": "Collect Workflows (Health)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Health Config').first().json.n8n_api_url + '/executions' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "250"
+            },
+            {
+              "name": "includeData",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "cursor",
+                    "value": "={{ $response.body.nextCursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextCursor }}",
+              "limitPagesFetched": true,
+              "maxRequests": 4
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "26bd74d0-6c77-47e7-88ea-e123f4aba8e9",
+      "name": "Fetch Executions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        780
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ID",
+          "name": "n8n API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ---------- shared helpers (identical in every node that needs them) ----------\n// SHA-1 in pure JavaScript, so no Node built-in module has to be enabled on the n8n instance\nconst sha1 = bytes => {\n  const ml = bytes.length;\n  const buf = new Uint8Array(((ml + 8) >> 6 << 6) + 64);\n  buf.set(bytes); buf[ml] = 0x80;\n  const dv = new DataView(buf.buffer);\n  dv.setUint32(buf.length - 4, (ml << 3) >>> 0);\n  dv.setUint32(buf.length - 8, Math.floor(ml / 0x20000000));\n  let h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;\n  const w = new Uint32Array(80);\n  for (let off = 0; off < buf.length; off += 64) {\n    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);\n    for (let i = 16; i < 80; i++) { const x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = ((x << 1) | (x >>> 31)) >>> 0; }\n    let a = h0, b = h1, c = h2, d = h3, e = h4;\n    for (let i = 0; i < 80; i++) {\n      let f, k;\n      if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }\n      else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }\n      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }\n      else { f = b ^ c ^ d; k = 0xCA62C1D6; }\n      const t = ((((a << 5) | (a >>> 27)) + f + e + k + w[i]) >>> 0);\n      e = d; d = c; c = ((b << 30) | (b >>> 2)) >>> 0; b = a; a = t;\n    }\n    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0; h4 = (h4 + e) >>> 0;\n  }\n  return [h0, h1, h2, h3, h4].map(x => x.toString(16).padStart(8, '0')).join('');\n};\n// Git object id of a file: sha1(\"blob <size>\\0<content>\"). Equal ids mean identical content.\nconst gitBlobSha = content => {\n  const body = Buffer.from(content, 'utf8');\n  return sha1(Buffer.concat([Buffer.from('blob ' + body.length + '\\0', 'utf8'), body]));\n};\nconst sortKeys = v => Array.isArray(v) ? v.map(sortKeys)\n  : (v && typeof v === 'object') ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys(v[k])])) : v;\nconst slug = s => (String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')\n  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '')) || 'workflow';\n\n// ---------- secret detection and redaction ----------\nconst KEY_RE = /(^|[_\\-. ])(api[_\\-. ]?key|secret|token|password|passwd|authorization|private[_\\-. ]?key|client[_\\-. ]?secret|access[_\\-. ]?key)([_\\-. ]|$)/;\nconst VALUE_PATTERNS = [\n  ['github-token', /\\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\\b|\\bgithub_pat_[A-Za-z0-9_]{22,}\\b/g],\n  ['aws-access-key', /\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b/g],\n  ['slack-token', /\\bxox[abprs]-[A-Za-z0-9-]{10,}\\b/g],\n  ['api-key', /\\bsk-[A-Za-z0-9_-]{20,}\\b/g],\n  ['google-api-key', /\\bAIza[0-9A-Za-z_-]{35}\\b/g],\n  ['stripe-key', /\\b[sr]k_live_[0-9A-Za-z]{16,}\\b/g],\n  ['telegram-bot-token', /\\b\\d{8,10}:[A-Za-z0-9_-]{35}\\b/g],\n  ['jwt', /\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b/g],\n  ['private-key', /-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g]\n];\nconst snake = k => String(k).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();\nconst looksLikeSecretKey = k => KEY_RE.test(snake(k));\nconst isPlaceholder = v => /^=/.test(v) || /^\\$\\{?[A-Z0-9_]+\\}?$/.test(v) || /^(REPLACE|YOUR|CHANGE|<|\\*{3,}|x{4,}|\\[REDACTED\\])/i.test(v) || /^https?:\\/\\//i.test(v);\nconst redact = input => {\n  const findings = [];\n  const walk = (v, keyHint) => {\n    if (Array.isArray(v)) return v.map(x => walk(x, null));\n    if (v && typeof v === 'object') {\n      const out = {};\n      const pairName = typeof v.name === 'string' && typeof v.value === 'string' && looksLikeSecretKey(v.name) ? v.name : null;\n      for (const k of Object.keys(v)) {\n        if (k === 'value' && pairName && v.value.trim().length >= 8 && !isPlaceholder(v.value)) { findings.push('key:' + pairName); out[k] = '[REDACTED]'; }\n        else out[k] = walk(v[k], k);\n      }\n      return out;\n    }\n    if (typeof v !== 'string') return v;\n    let s = v;\n    if (keyHint && looksLikeSecretKey(keyHint) && s.trim().length >= 8 && !isPlaceholder(s)) { findings.push('key:' + keyHint); return '[REDACTED]'; }\n    for (const [name, re] of VALUE_PATTERNS) {\n      s = s.replace(re, () => { findings.push(name); return '[REDACTED]'; });\n    }\n    return s;\n  };\n  return { value: walk(input, null), findings };\n};\nconst sanitizeWorkflow = w => {\n  const base = {\n    id: String(w.id), name: w.name, active: !!w.active,\n    nodes: w.nodes || [], connections: w.connections || {}, settings: w.settings || {},\n    tags: (w.tags || []).map(t => (t && t.name) || t).filter(Boolean).sort()\n  };\n  if (w.meta) base.meta = w.meta;\n  // pinData and staticData are dropped on purpose: they can hold real customer data\n  const r = redact(base);\n  return { workflow: sortKeys(r.value), findings: r.findings };\n};\nconst NOW = Date.now(), DAY = 86400e3;\nconst LONG_RUN_MS = 10 * 60e3;\nconst workflows = $('Collect Workflows (Health)').first().json.workflows;\nconst execs = [];\nfor (const p of $input.all().map(i => i.json)) if (p && !p.error && Array.isArray(p.data)) for (const e of p.data) if (e) execs.push(e);\nconst execErrors = $input.all().filter(i => i.json && i.json.error).length;\nconst esc = x => String(x === null || x === undefined ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst nameOf = new Map(workflows.map(w => [String(w.id), String(w.name || w.id)]));\nconst nodesOf = w => Array.isArray(w.nodes) ? w.nodes : [];\nconst isErrorWf = w => nodesOf(w).some(n => n.type === 'n8n-nodes-base.errorTrigger');\n\nconst active = workflows.filter(w => w.active);\nconst noErrorWf = active.filter(w => !isErrorWf(w) && !(w.settings && w.settings.errorWorkflow));\nconst openWebhooks = [];\nfor (const w of active) for (const n of nodesOf(w)) {\n  if (n.type === 'n8n-nodes-base.webhook' && (!n.parameters || !n.parameters.authentication || n.parameters.authentication === 'none')) {\n    openWebhooks.push((w.name || w.id) + ' / ' + (n.name || 'Webhook'));\n  }\n}\nconst withSecrets = workflows.map(w => ({ name: String(w.name || w.id), n: redact({ nodes: nodesOf(w), settings: w.settings || {} }).findings.length })).filter(x => x.n > 0);\n\nconst startedAt = e => Date.parse(e.startedAt);\nconst valid = execs.filter(e => Number.isFinite(startedAt(e)));\nconst last24 = valid.filter(e => NOW - startedAt(e) <= DAY);\nconst failed24 = last24.filter(e => e.status === 'error' || e.status === 'crashed');\nconst perWf = new Map();\nfor (const e of failed24) perWf.set(String(e.workflowId), (perWf.get(String(e.workflowId)) || 0) + 1);\nconst topFailing = [...perWf.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);\nconst rate = last24.length ? failed24.length / last24.length : 0;\nconst longRuns = last24.filter(e => e.stoppedAt && Date.parse(e.stoppedAt) - startedAt(e) > LONG_RUN_MS);\nconst longest = longRuns.reduce((m, e) => Math.max(m, Date.parse(e.stoppedAt) - startedAt(e)), 0);\n\nlet windowDays = 0, zombies = [], zombieNote = '';\nif (valid.length) windowDays = (NOW - Math.min(...valid.map(startedAt))) / DAY;\nif (windowDays >= 7) {\n  const seen = new Set(valid.map(e => String(e.workflowId)));\n  zombies = active.filter(w => !isErrorWf(w) && !seen.has(String(w.id))).map(w => String(w.name || w.id));\n} else zombieNote = 'Idle-workflow check skipped: only ' + windowDays.toFixed(1) + ' days of executions were fetched (need 7+).';\n\nconst warn = failed24.length > 0 || openWebhooks.length > 0 || withSecrets.length > 0 || noErrorWf.length > 0 || longRuns.length > 0;\nconst L = [];\nL.push((warn ? '🩺' : '✅') + ' <b>n8n health</b>');\nL.push('Workflows: ' + workflows.length + ' (' + active.length + ' active, ' + (workflows.length - active.length) + ' inactive)');\nL.push('Executions in the last 24 h: ' + last24.length + ', failed: ' + failed24.length + (last24.length ? ' (' + Math.round(rate * 100) + '%)' : ''));\nif (topFailing.length) { L.push('', '<b>Most failures</b>'); for (const [id, n] of topFailing) L.push('• ' + esc(nameOf.get(id) || ('workflow ' + id)) + ': ' + n); }\nif (longRuns.length) L.push('', '⏱ ' + longRuns.length + ' execution(s) ran longer than 10 min (longest ' + Math.round(longest / 60000) + ' min)');\nif (openWebhooks.length) { L.push('', '🔓 <b>Active webhooks without authentication</b>'); for (const x of openWebhooks.slice(0, 8)) L.push('• ' + esc(x)); if (openWebhooks.length > 8) L.push('and ' + (openWebhooks.length - 8) + ' more'); }\nif (withSecrets.length) { L.push('', '🔑 <b>Hardcoded secrets</b> in: ' + esc(withSecrets.slice(0, 8).map(x => x.name).join(', ')) + (withSecrets.length > 8 ? ' and ' + (withSecrets.length - 8) + ' more' : '')); }\nif (noErrorWf.length) { L.push('', '📭 ' + noErrorWf.length + ' active workflow(s) have no Error Workflow: ' + esc(noErrorWf.slice(0, 6).map(w => w.name || w.id).join(', ')) + (noErrorWf.length > 6 ? ' ...' : '')); }\nif (zombies.length) L.push('', '💤 Active but no execution in ' + Math.floor(windowDays) + ' days: ' + esc(zombies.slice(0, 8).join(', ')) + (zombies.length > 8 ? ' and ' + (zombies.length - 8) + ' more' : ''));\nif (zombieNote) L.push('', esc(zombieNote));\nif (execErrors) L.push('', '⚠️ Some execution pages could not be read, so counts may be low.');\nreturn [{ json: { text: L.join('\\n').slice(0, 3800), stats: { workflows: workflows.length, active: active.length, executions_24h: last24.length, failed_24h: failed24.length,\n  open_webhooks: openWebhooks.length, secrets: withSecrets.length, no_error_workflow: noErrorWf.length, zombies: zombies.length, long_runs: longRuns.length } } }];"
+      },
+      "id": "a591f6e8-1622-43f8-85b5-1b8e9ad25056",
+      "name": "Analyze Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "e888236e-62f9-46d8-b7e4-d942ca0cef21",
+      "name": "Send Health Report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1820,
+        780
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "c2aeec99-2259-442f-a396-b000b5101566",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const e = $input.first().json;\nconst wf = (e.workflow && e.workflow.name) || 'unknown workflow';\nconst node = (e.execution && e.execution.lastNodeExecuted) || 'unknown node';\nconst msg = (e.execution && e.execution.error && e.execution.error.message) || 'unknown error';\nconst url = (e.execution && e.execution.url) || '';\nreturn [{ json: { text: 'WORKFLOW ERROR\\n\\nWorkflow: ' + wf + '\\nFailed node: ' + node + '\\nError: ' + String(msg).slice(0, 500) + (url ? '\\n' + url : '') } }];"
+      },
+      "id": "e85f1311-4267-4b88-8835-2a6f443b55a6",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        1300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "4146c7c6-ced6-4955-a42a-e88976f56271",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        520,
+        1300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Backup Schedule": {
+      "main": [
+        [
+          {
+            "node": "Backup Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Backup": {
+      "main": [
+        [
+          {
+            "node": "Backup Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backup Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Backup Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Backup Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Workflows (Backup)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Workflows (Backup)": {
+      "main": [
+        [
+          {
+            "node": "Collect Workflows (Backup)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Workflows (Backup)": {
+      "main": [
+        [
+          {
+            "node": "List Repo Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Repo Files": {
+      "main": [
+        [
+          {
+            "node": "Plan Backup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Backup": {
+      "main": [
+        [
+          {
+            "node": "Files To Write?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Files To Write?": {
+      "main": [
+        [
+          {
+            "node": "Write File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Backup Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write File": {
+      "main": [
+        [
+          {
+            "node": "Collect Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Results": {
+      "main": [
+        [
+          {
+            "node": "Format Backup Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Backup Report": {
+      "main": [
+        [
+          {
+            "node": "Send Backup Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Health Schedule": {
+      "main": [
+        [
+          {
+            "node": "Health Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Health": {
+      "main": [
+        [
+          {
+            "node": "Health Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Health Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Health Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Workflows (Health)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Workflows (Health)": {
+      "main": [
+        [
+          {
+            "node": "Collect Workflows (Health)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Workflows (Health)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Executions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Executions": {
+      "main": [
+        [
+          {
+            "node": "Analyze Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Health": {
+      "main": [
+        [
+          {
+            "node": "Send Health Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Jakarta"
+  },
+  "active": false,
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
